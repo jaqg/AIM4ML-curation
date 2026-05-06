@@ -16,8 +16,7 @@ Output:
 import os
 import argparse
 import pandas as pd
-
-LOG_EVERY = 50   # print progress every N molecules
+from tqdm import tqdm
 
 # --- Paths -------------------------------------------------------------------
 PATHS = {
@@ -27,7 +26,7 @@ PATHS = {
     },
     "full": {
         "xyz_csv":    "/datos_pool/mldata1/QMdatasets/QM40/xyz.csv",
-        "output_dir": "/home/joseq/AIM4ML/QM40/xyz_files",
+        "output_dir": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/xyz_files",
     },
 }
 # -----------------------------------------------------------------------------
@@ -79,7 +78,7 @@ def main():
     n_total = len(groups)
     print(f"Found {n_total} molecules. Writing XYZ files to {OUTPUT_DIR}/")
 
-    for i, (zinc_id, group) in enumerate(groups, start=1):
+    for zinc_id, group in tqdm(groups, total=n_total, desc="Writing XYZ", unit="mol"):
         smiles = group["smile"].iloc[0]
         atoms  = group["atom"].tolist()
         coords = list(zip(
@@ -90,9 +89,6 @@ def main():
 
         out_path = os.path.join(OUTPUT_DIR, f"{zinc_id}.xyz")
         write_xyz(out_path, zinc_id, smiles, atoms, coords)
-
-        if i % LOG_EVERY == 0 or i == n_total:
-            print(f"  {i}/{n_total} done")
 
     print(f"\nDone. {n_total} XYZ files written to {OUTPUT_DIR}/")
 
