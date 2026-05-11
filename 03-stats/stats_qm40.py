@@ -21,6 +21,7 @@ Usage:
 
 import os
 import argparse
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -33,9 +34,9 @@ from rdkit.Chem import Descriptors, rdMolDescriptors, rdFingerprintGenerator
 # --- Paths -------------------------------------------------------------------
 PATHS = {
     "sample": {
-        "mapping_csv": "../../samples/qm40/qm40_mapping.csv",
-        "stats_csv":   "../../samples/qm40/qm40_stats.csv",
-        "plots_dir":   "../../samples/qm40/plots",
+        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
+        "stats_csv":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_stats.csv",
+        "plots_dir":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/plots",
     },
     "full": {
         "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/qm40_mapping.csv",
@@ -52,6 +53,17 @@ def parse_args():
         "--full-data",
         action="store_true",
         help="Run on the full QM40 dataset on the cluster (default: local sample).",
+    )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Run on sample dataset (cluster absolute paths, default).",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers for Tanimoto NN computation (default: 1).",
     )
     return parser.parse_args()
 
@@ -92,29 +104,60 @@ def compute_fingerprints(smiles_list):
     return fps
 
 
-def compute_nearest_neighbour_tanimoto(fps, n_total):
+def _tanimoto_chunk(args):
+    """Worker: compute max Tanimoto for a chunk of rows against the full fp matrix."""
+    fp_matrix, popcounts, indices = args
+    results = []
+    for j in indices:
+        intersections = fp_matrix[j].dot(fp_matrix.T)
+        unions = popcounts[j] + popcounts - intersections
+        sims = np.where(unions > 0, intersections / unions, 0.0)
+        sims[j] = 0.0  # exclude self
+        results.append((j, float(sims.max()) if len(sims) > 1 else 0.0))
+    return results
+
+
+def compute_nearest_neighbour_tanimoto(fps, n_total, n_workers=1):
     """
     For each molecule i, compute its maximum Tanimoto similarity to any other molecule.
 
-    Uses RDKit's BulkTanimotoSimilarity (C++ implementation) for speed.
-    Self-similarity (always 1.0) is excluded by zeroing index i before taking max.
-
-    For N=162K molecules: ~26B comparisons, typically finishes in under a minute
-    on cluster hardware with RDKit's POPCNT-accelerated bit operations.
-
-    Returns a list of float (or None if the fingerprint was missing).
+    Converts fps to a numpy uint8 matrix for picklable parallelism across workers.
+    Self-similarity is excluded. Returns a list of float (None for missing fps).
     """
-    # Build a list of (index, fp) pairs for non-None fingerprints
     valid = [(i, fp) for i, fp in enumerate(fps) if fp is not None]
-    valid_fps = [fp for _, fp in valid]
+    n_valid = len(valid)
+    valid_indices = [i for i, _ in valid]
+
+    # Build numpy fp matrix — uint8, shape (n_valid, fpSize); picklable unlike RDKit objects
+    fpSize = len(valid[0][1].ToBitString()) if valid else 2048
+    fp_matrix = np.zeros((n_valid, fpSize), dtype=np.uint8)
+    for k, (_, fp) in enumerate(valid):
+        DataStructs.ConvertToNumpyArray(fp, fp_matrix[k])
+    popcounts = fp_matrix.sum(axis=1).astype(np.float32)
+
+    # Split row indices into chunks, one per worker
+    row_indices = list(range(n_valid))
+    chunks = np.array_split(row_indices, n_workers)
+    chunks = [c.tolist() for c in chunks if len(c) > 0]
 
     max_tanimoto = [None] * len(fps)
 
-    for j, (i, fp) in enumerate(tqdm(valid, desc="Tanimoto NN", unit="mol"), start=1):
-        sims = np.array(DataStructs.BulkTanimotoSimilarity(fp, valid_fps))
-        # Zero out the self-similarity entry (index j-1 in valid_fps corresponds to i in fps)
-        sims[j - 1] = 0.0
-        max_tanimoto[i] = float(sims.max()) if len(sims) > 1 else 0.0
+    if n_workers == 1:
+        results = _tanimoto_chunk((fp_matrix, popcounts, row_indices))
+        for orig_j, val in tqdm(results, desc="Tanimoto NN", unit="mol", total=n_valid):
+            max_tanimoto[valid_indices[orig_j]] = val
+    else:
+        chunk_args = [(fp_matrix, popcounts, chunk) for chunk in chunks]
+        print(f"  Tanimoto NN: {n_valid} mols across {n_workers} workers ...")
+        with mp.Pool(processes=n_workers) as pool:
+            for chunk_results in tqdm(
+                pool.imap_unordered(_tanimoto_chunk, chunk_args),
+                desc="Tanimoto NN chunks",
+                unit="chunk",
+                total=len(chunks),
+            ):
+                for orig_j, val in chunk_results:
+                    max_tanimoto[valid_indices[orig_j]] = val
 
     return max_tanimoto
 
@@ -134,8 +177,9 @@ def save_histogram(values, xlabel, title, path, bins=50, color="#4C72B0"):
 
 
 def main():
-    args  = parse_args()
-    mode  = "full" if args.full_data else "sample"
+    args      = parse_args()
+    mode = "full" if args.full_data else "sample"
+    n_workers = args.workers
     paths = PATHS[mode]
 
     MAPPING_CSV = paths["mapping_csv"]
@@ -168,7 +212,7 @@ def main():
     # Step 2 — nearest-neighbour Tanimoto
     # -------------------------------------------------------------------------
     fps = compute_fingerprints(smiles_list)
-    max_tanimoto = compute_nearest_neighbour_tanimoto(fps, n_total)
+    max_tanimoto = compute_nearest_neighbour_tanimoto(fps, n_total, n_workers=n_workers)
 
     # -------------------------------------------------------------------------
     # Step 3 — build and write master stats CSV

@@ -26,9 +26,9 @@ RDLogger.DisableLog('rdApp.*')
 
 PATHS = {
     "sample": {
-        "main_csv":      "../../samples/qm40/sample_main.csv",
-        "filtered_csv":  "../../samples/qm40/filtered_sample_main.csv",
-        "log_dir":       "../../samples/qm40/logs",
+        "main_csv":      "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/sample_main.csv",
+        "filtered_csv":  "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/filtered_sample_main.csv",
+        "log_dir":       "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/logs",
     },
     "full": {
         "main_csv":      "/datos_pool/mldata1/QMdatasets/QM40/main.csv",
@@ -42,6 +42,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Phase 1 curation filter for QM40.")
     parser.add_argument("--full-data", action="store_true",
                         help="Run on the full QM40 dataset on the cluster (default: local sample).")
+    parser.add_argument("--sample", action="store_true",
+                            help="Run on sample dataset (cluster absolute paths).")
     return parser.parse_args()
 
 

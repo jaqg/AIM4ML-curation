@@ -21,8 +21,8 @@ from tqdm import tqdm
 # --- Paths -------------------------------------------------------------------
 PATHS = {
     "sample": {
-        "xyz_csv":    "../../samples/qm40/sample_xyz.csv",
-        "output_dir": "../../samples/qm40/xyz_files",
+        "xyz_csv":    "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/sample_xyz.csv",
+        "output_dir": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/xyz_files",
     },
     "full": {
         "xyz_csv":    "/datos_pool/mldata1/QMdatasets/QM40/xyz.csv",
@@ -57,12 +57,17 @@ def parse_args():
         action="store_true",
         help="Run on the full QM40 dataset on the cluster (default: local sample).",
     )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Run on sample dataset (cluster absolute paths, default).",
+    )
     return parser.parse_args()
 
 
 def main():
     args   = parse_args()
-    mode   = "full" if args.full_data else "sample"
+    mode = "full" if args.full_data else "sample"
     paths  = PATHS[mode]
 
     XYZ_CSV    = paths["xyz_csv"]

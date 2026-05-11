@@ -23,7 +23,6 @@ import os
 import sys
 import argparse
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
@@ -33,9 +32,9 @@ ANTECHAMBER  = "/opt/amber23/bin/antechamber"
 
 PATHS = {
     "sample": {
-        "mol_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/mol_files",
-        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
-        "log_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/logs",
+        "mol_dir":     "../../samples/qm40/mol_files",
+        "mapping_csv": "../../samples/qm40/qm40_mapping.csv",
+        "log_dir":     "../../samples/qm40/logs",
     },
     "full": {
         "mol_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/mol_files",
@@ -49,10 +48,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="AMBER canonical atom reordering for QM40 (D17).")
     parser.add_argument("--full-data", action="store_true",
                         help="Run on the full QM40 dataset on the cluster (default: local sample).")
-    parser.add_argument("--sample", action="store_true",
-                            help="Run on sample dataset (cluster absolute paths).")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="Number of parallel workers (default: 1). Uses threads — safe for subprocess.")
     return parser.parse_args()
 
 
@@ -82,25 +77,9 @@ def reorder_xyz(xyz_path):
     return os.path.exists(xyz_path)
 
 
-def _reorder_one(args):
-    """Worker: reorder one molecule. Returns (row_idx, status, row_dict_or_None)."""
-    row_idx, xyz_path, sdf_path, row_dict = args
-    if not os.path.exists(xyz_path):
-        return row_idx, "missing", None
-    success = reorder_xyz(xyz_path)
-    if success:
-        return row_idx, "success", None
-    orig_path = xyz_path + "_ORIG"
-    for path in (orig_path, sdf_path):
-        if os.path.exists(path):
-            os.remove(path)
-    return row_idx, "failed", row_dict
-
-
 def main():
-    args      = parse_args()
+    args = parse_args()
     mode = "full" if args.full_data else "sample"
-    n_workers = args.workers
     paths = PATHS[mode]
 
     MOL_DIR     = paths["mol_dir"]
@@ -116,26 +95,33 @@ def main():
     n_total = len(mapping_df)
     print(f"  {n_total} molecules")
 
-    print(f"\nReordering atoms (AMBER canonical, D17) — {n_workers} worker(s) ...")
+    statuses = []
+    failed   = []
 
-    work_items = []
-    for idx, (_, row) in enumerate(mapping_df.iterrows()):
-        cid      = row["ID"]
-        iconf    = row["ICONF"]
+    print(f"\nReordering atoms (AMBER canonical, D17) ...")
+    for _, row in tqdm(mapping_df.iterrows(), total=n_total, desc="Reordering", unit="mol", file=sys.stdout):
+        cid   = row["ID"]
+        iconf = row["ICONF"]
+
         xyz_path = os.path.join(MOL_DIR, f"mol_{cid}_{iconf}.xyz")
         sdf_path = os.path.join(MOL_DIR, f"mol_{cid}_{iconf}.sdf")
-        work_items.append((idx, xyz_path, sdf_path, row.to_dict()))
 
-    results = [None] * n_total
+        if not os.path.exists(xyz_path):
+            statuses.append("missing")
+            continue
 
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_reorder_one, item): item[0] for item in work_items}
-        for future in tqdm(as_completed(futures), total=n_total, desc="Reordering", unit="mol", file=sys.stdout):
-            row_idx, status, row_dict = future.result()
-            results[row_idx] = (status, row_dict)
+        success = reorder_xyz(xyz_path)
 
-    statuses = [r[0] for r in results]
-    failed   = [r[1] for r in results if r[1] is not None]
+        if success:
+            statuses.append("success")
+        else:
+            # Shell script renamed xyz → xyz_ORIG on failure; clean up both.
+            orig_path = xyz_path + "_ORIG"
+            for path in (orig_path, sdf_path):
+                if os.path.exists(path):
+                    os.remove(path)
+            statuses.append("failed")
+            failed.append(row.to_dict())
 
     mapping_df["reorder_status"] = statuses
     mapping_df.to_csv(MAPPING_CSV, index=False)

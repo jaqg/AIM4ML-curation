@@ -29,9 +29,9 @@ from rdkit import Chem
 # --- Paths -------------------------------------------------------------------
 PATHS = {
     "sample": {
-        "mapping_csv": "../../samples/qm40/qm40_mapping.csv",
-        "log_dir":     "../../samples/qm40/logs",
-        "out_dir":     "../../samples/qm40/logs",
+        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
+        "log_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/logs",
+        "out_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/logs",
     },
     "full": {
         "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/qm40_mapping.csv",
@@ -89,9 +89,11 @@ def main():
     parser = argparse.ArgumentParser(description="QA check for SMILES-template fallback molecules.")
     parser.add_argument("--full-data", action="store_true",
                         help="Run on full-data cluster logs (default: local sample).")
+    parser.add_argument("--sample", action="store_true",
+                            help="Run on sample dataset (cluster absolute paths).")
     args = parser.parse_args()
 
-    mode  = "full" if args.full_data else "sample"
+    mode = "full" if args.full_data else "sample"
     paths = PATHS[mode]
 
     print(f"Mode: {mode}")

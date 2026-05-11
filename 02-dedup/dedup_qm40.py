@@ -41,17 +41,17 @@ _rdlog = RDLogger.logger()                # kept for the CRITICAL/WARNING toggle
 # rather than the conventional double-bond form (S=O).
 _NORMALIZER = rdMolStandardize.Normalizer()
 
-HASH_LENGTH = 12   # characters of MD5 to use as ID (full MD5 = 32)
+HASH_LENGTH = 32   # full MD5 hex (D19/D20: 32-char for dataset scale safety)
 
 # --- Paths -------------------------------------------------------------------
 PATHS = {
     "sample": {
-        "main_csv":    "../../samples/qm40/filtered_sample_main.csv",
-        "xyz_csv":     "../../samples/qm40/sample_xyz.csv",
-        "bond_csv":    "../../samples/qm40/sample_bond.csv",
-        "xyz_dir":     "../../samples/qm40/xyz_files",
-        "out_dir":     "../../samples/qm40/mol_files",
-        "mapping_csv": "../../samples/qm40/qm40_mapping.csv",
+        "main_csv":    "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/filtered_sample_main.csv",
+        "xyz_csv":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/sample_xyz.csv",
+        "bond_csv":    "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/sample_bond.csv",
+        "xyz_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/xyz_files",
+        "out_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/mol_files",
+        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
         "file_mode":   "copy",
     },
     "full": {
@@ -86,6 +86,11 @@ def parse_args():
         "--full-data",
         action="store_true",
         help="Run on the full QM40 dataset on the cluster (default: local sample).",
+    )
+    parser.add_argument(
+        "--sample",
+        action="store_true",
+        help="Run on sample dataset (cluster absolute paths, default).",
     )
     return parser.parse_args()
 
@@ -330,7 +335,7 @@ def write_sdf(path, mol, zinc_id, can_smi):
 
 def main():
     args  = parse_args()
-    mode  = "full" if args.full_data else "sample"
+    mode = "full" if args.full_data else "sample"
     paths = PATHS[mode]
 
     MAIN_CSV    = paths["main_csv"]

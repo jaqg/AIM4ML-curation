@@ -34,10 +34,10 @@ QSUM_TOL   = 0.05   # e  — tolerance for total Mulliken charge sum (neutral mo
 
 PATHS = {
     "sample": {
-        "xyz_csv":     "../../samples/qm40/sample_xyz.csv",
-        "bond_csv":    "../../samples/qm40/sample_bond.csv",
-        "mapping_csv": "../../samples/qm40/qm40_mapping.csv",
-        "mol_dir":     "../../samples/qm40/mol_files",
+        "xyz_csv":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/sample_xyz.csv",
+        "bond_csv":    "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/sample_bond.csv",
+        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
+        "mol_dir":     "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/mol_files",
     },
     "full": {
         "xyz_csv":     "/datos_pool/mldata1/QMdatasets/QM40/xyz.csv",
@@ -53,6 +53,10 @@ def parse_args():
     parser.add_argument(
         "--full-data", action="store_true",
         help="Validate the full QM40 output on the cluster (default: sample).",
+    )
+    parser.add_argument(
+        "--sample", action="store_true",
+        help="Validate sample dataset output (cluster absolute paths, default).",
     )
     return parser.parse_args()
 
@@ -84,7 +88,7 @@ def check(condition, msg, errors):
 
 def main():
     args  = parse_args()
-    mode  = "full" if args.full_data else "sample"
+    mode = "full" if args.full_data else "sample"
     paths = PATHS[mode]
 
     print(f"Mode: {mode}")

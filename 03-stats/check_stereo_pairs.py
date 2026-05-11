@@ -33,9 +33,9 @@ tqdm.pandas(desc="Stereo strip", unit="mol")
 # --- Paths -------------------------------------------------------------------
 PATHS = {
     "sample": {
-        "stats_csv": "../../samples/qm40/qm40_stats.csv",
-        "out_stereo": "../../samples/qm40/logs/stereo_pairs.tsv",
-        "out_twins":  "../../samples/qm40/logs/structural_twins.tsv",
+        "stats_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_stats.csv",
+        "out_stereo": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/logs/stereo_pairs.tsv",
+        "out_twins":  "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/logs/structural_twins.tsv",
     },
     "full": {
         "stats_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/qm40_stats.csv",
@@ -51,6 +51,8 @@ NEAR_DUP_THRESHOLD = 0.85   # Tanimoto threshold used in stats_qm40.py
 def parse_args():
     parser = argparse.ArgumentParser(description="Investigate near-duplicate pairs in QM40.")
     parser.add_argument("--full-data", action="store_true")
+    parser.add_argument("--sample", action="store_true",
+                            help="Run on sample dataset (cluster absolute paths).")
     return parser.parse_args()
 
 
@@ -67,7 +69,7 @@ def strip_stereo(smi):
 
 def main():
     args  = parse_args()
-    mode  = "full" if args.full_data else "sample"
+    mode = "full" if args.full_data else "sample"
     paths = PATHS[mode]
 
     print(f"Mode: {mode}")
