@@ -4,6 +4,7 @@ filter_qm40.py — Phase 1 curation filter for QM40.
 
 Criteria:
     - Neutral:      formal charge == 0       (RDKit, from canonical SMILES)
+    - Non-zwitterion: no atom carries a non-zero formal charge  (superset of neutral)
     - Closed-shell: radical electrons == 0   (RDKit, from canonical SMILES)
 
 Writes:
@@ -55,6 +56,7 @@ def check_molecule(smiles):
     reason is '' when passes=True, or a short code when passes=False:
       'smiles_unparseable' — RDKit could not parse the SMILES
       'charge=+N'          — molecule carries a net formal charge
+      'zwitterion'         — net-neutral but atoms carry formal charges (antechamber fails)
       'radicals=N'         — molecule has unpaired electrons (open-shell)
     """
     mol = Chem.MolFromSmiles(smiles)
@@ -64,6 +66,9 @@ def check_molecule(smiles):
     charge = sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
     if charge != 0:
         return False, f"charge={charge:+d}"
+
+    if any(atom.GetFormalCharge() != 0 for atom in mol.GetAtoms()):
+        return False, "zwitterion"
 
     radicals = sum(atom.GetNumRadicalElectrons() for atom in mol.GetAtoms())
     if radicals > 0:
@@ -92,7 +97,7 @@ def main():
     passed   = []
     rejected = []
 
-    print(f"\nApplying filter (neutral + closed-shell) ...")
+    print(f"\nApplying filter (neutral + non-zwitterion + closed-shell) ...")
     for _, row in tqdm(main_df.iterrows(), total=n_total, desc="Filtering", unit="mol", file=sys.stdout):
         ok, reason = check_molecule(row["smile"])
         if ok:
