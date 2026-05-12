@@ -102,13 +102,17 @@ def compute_fingerprints(smiles_list):
     return fps
 
 
-def _tanimoto_chunk(args):
-    """Worker: compute max Tanimoto for a chunk of rows against the full fp matrix."""
-    fp_matrix, popcounts, indices = args
+# Module-level globals so forked workers inherit fp_matrix/popcounts without pickling.
+_FP_MATRIX  = None
+_POPCOUNTS  = None
+
+
+def _tanimoto_chunk(indices):
+    """Worker: compute max Tanimoto for a chunk of row indices against the full fp matrix."""
     results = []
     for j in indices:
-        intersections = fp_matrix[j].dot(fp_matrix.T)
-        unions = popcounts[j] + popcounts - intersections
+        intersections = _FP_MATRIX[j].dot(_FP_MATRIX.T)
+        unions = _POPCOUNTS[j] + _POPCOUNTS - intersections
         sims = np.where(unions > 0, intersections / unions, 0.0)
         sims[j] = 0.0  # exclude self
         results.append((j, float(sims.max()) if len(sims) > 1 else 0.0))
@@ -119,37 +123,40 @@ def compute_nearest_neighbour_tanimoto(fps, n_total, n_workers=1):
     """
     For each molecule i, compute its maximum Tanimoto similarity to any other molecule.
 
-    Converts fps to a numpy uint8 matrix for picklable parallelism across workers.
+    Converts fps to a numpy uint8 matrix. On Linux the matrix is inherited by forked
+    workers via copy-on-write — not pickled per task — so IPC overhead is minimal.
     Self-similarity is excluded. Returns a list of float (None for missing fps).
     """
+    global _FP_MATRIX, _POPCOUNTS
+
     valid = [(i, fp) for i, fp in enumerate(fps) if fp is not None]
     n_valid = len(valid)
     valid_indices = [i for i, _ in valid]
 
-    # Build numpy fp matrix — uint8, shape (n_valid, fpSize); picklable unlike RDKit objects
+    # Build numpy fp matrix — uint8, shape (n_valid, fpSize)
     fpSize = len(valid[0][1].ToBitString()) if valid else 2048
-    fp_matrix = np.zeros((n_valid, fpSize), dtype=np.uint8)
+    _FP_MATRIX = np.zeros((n_valid, fpSize), dtype=np.uint8)
     for k, (_, fp) in enumerate(valid):
-        DataStructs.ConvertToNumpyArray(fp, fp_matrix[k])
-    popcounts = fp_matrix.sum(axis=1).astype(np.float32)
+        DataStructs.ConvertToNumpyArray(fp, _FP_MATRIX[k])
+    _POPCOUNTS = _FP_MATRIX.sum(axis=1).astype(np.float32)
 
-    # Split row indices into chunks, one per worker
     row_indices = list(range(n_valid))
-    chunks = np.array_split(row_indices, n_workers)
-    chunks = [c.tolist() for c in chunks if len(c) > 0]
-
     max_tanimoto = [None] * len(fps)
 
     if n_workers == 1:
-        results = _tanimoto_chunk((fp_matrix, popcounts, row_indices))
+        results = _tanimoto_chunk(row_indices)
         for orig_j, val in tqdm(results, desc="Tanimoto NN", unit="mol", total=n_valid):
             max_tanimoto[valid_indices[orig_j]] = val
     else:
-        chunk_args = [(fp_matrix, popcounts, chunk) for chunk in chunks]
-        print(f"  Tanimoto NN: {n_valid} mols across {n_workers} workers ...")
+        # More chunks than workers → tqdm updates frequently as workers grab work
+        n_chunks = n_workers * 20
+        chunks = np.array_split(row_indices, n_chunks)
+        chunks = [c.tolist() for c in chunks if len(c) > 0]
+        print(f"  Tanimoto NN: {n_valid} mols, {n_workers} workers, {len(chunks)} chunks ...")
+        # Pool is created AFTER globals are set so forked workers inherit _FP_MATRIX
         with mp.Pool(processes=n_workers) as pool:
             for chunk_results in tqdm(
-                pool.imap_unordered(_tanimoto_chunk, chunk_args),
+                pool.imap_unordered(_tanimoto_chunk, chunks),
                 desc="Tanimoto NN chunks",
                 unit="chunk",
                 total=len(chunks),

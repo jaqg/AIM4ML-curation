@@ -494,6 +494,11 @@ def main():
                 dst_sdf = os.path.join(OUT_DIR, f"mol_{cid}_{iconf}.sdf")
                 try:
                     write_sdf(dst_sdf, mol, zinc_id, can_smi)
+                    # Verify RDKit can read it back with full sanitization —
+                    # SDWriter can silently write mols that fail on read (e.g. valence violations).
+                    readback = next(iter(Chem.SDMolSupplier(dst_sdf, removeHs=False)), None)
+                    if readback is None:
+                        raise ValueError("SDF read-back failed sanitization")
                 except Exception:
                     skipped_sdf.append(zinc_id)
                     sdf_status = "sdf_failed"

@@ -101,15 +101,17 @@ def main():
     xyz_groups  = {zid: grp for zid, grp in xyz_df.groupby("Zinc_id",  sort=False)}
     bond_counts = bond_df.groupby("Zinc_id").size().to_dict()
 
-    n_total  = len(map_df)
-    failures = []   # list of (zinc_id, [error messages])
+    n_total      = len(map_df)
+    n_sdf_failed = (map_df.get("sdf_status", pd.Series(["ok"] * n_total)) == "sdf_failed").sum()
+    failures     = []   # list of (zinc_id, [error messages])
 
     for _, row in tqdm(map_df.iterrows(), total=n_total, desc="Validating", unit="mol"):
-        zinc_id = row["Zinc_id"]
-        cid     = row["ID"]
-        iconf   = int(row["ICONF"])
-        nat_map = int(row["NAT"])
-        can_smi = row["canonical_SMILES"]
+        zinc_id    = row["Zinc_id"]
+        cid        = row["ID"]
+        iconf      = int(row["ICONF"])
+        nat_map    = int(row["NAT"])
+        can_smi    = row["canonical_SMILES"]
+        sdf_status = row.get("sdf_status", "ok")
 
         xyz_path = os.path.join(paths["mol_dir"], f"mol_{cid}_{iconf}.xyz")
         sdf_path = os.path.join(paths["mol_dir"], f"mol_{cid}_{iconf}.sdf")
@@ -121,7 +123,9 @@ def main():
         xyz_exists = os.path.exists(xyz_path)
         sdf_exists = os.path.exists(sdf_path)
         check(xyz_exists, "XYZ file missing", errs)
-        check(sdf_exists, "SDF file missing", errs)
+        # SDF may be legitimately absent when dedup marked it sdf_failed
+        if sdf_status != "sdf_failed":
+            check(sdf_exists, "SDF file missing", errs)
 
         if not xyz_exists:
             failures.append((zinc_id, errs))
@@ -170,6 +174,11 @@ def main():
         # ------------------------------------------------------------------
         # Cross-check SDF
         # ------------------------------------------------------------------
+        if sdf_status == "sdf_failed":
+            if errs:
+                failures.append((zinc_id, errs))
+            continue
+
         if not sdf_exists:
             failures.append((zinc_id, errs))
             continue
@@ -230,6 +239,8 @@ def main():
     # ------------------------------------------------------------------
     n_pass = n_total - len(failures)
     print(f"Results: {n_pass}/{n_total} molecules passed all checks")
+    if n_sdf_failed:
+        print(f"SDF skipped (sdf_failed in mapping): {n_sdf_failed} — XYZ-only checks applied")
     print(f"ID uniqueness: {'OK' if id_ok else f'FAIL — {n_total - n_ids} collision(s)'}\n")
 
     if failures:
