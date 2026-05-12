@@ -137,7 +137,9 @@ def main():
     stats = stats_df.set_index("ID")[["TPSA", "charge"]].to_dict("index")
 
     kept = mapping[
-        (mapping["reorder_status"] == "success") & (mapping["stereo_status"] == "kept")
+        (mapping["reorder_status"] == "success") &
+        (mapping["stereo_status"]  == "kept") &
+        (mapping["sdf_status"]     != "sdf_failed")
     ].copy()
 
     assert not any("." in s for s in kept["canonical_SMILES"]), \
