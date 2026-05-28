@@ -36,18 +36,19 @@ else
 _SAMPLE        :=
 endif
 
-_PARSE         := $(STAMPS)/parse.done
-_FILTER        := $(STAMPS)/filter.done
-_DEDUP         := $(STAMPS)/dedup.done
-_REORDER       := $(STAMPS)/reorder.done
-_STEREO_FILTER := $(STAMPS)/stereo_filter.done
-_VALIDATE      := $(STAMPS)/validate.done
-_STATS         := $(STAMPS)/stats.done
-_EXTXYZ        := $(STAMPS)/extxyz.done
+_PARSE              := $(STAMPS)/parse.done
+_FILTER             := $(STAMPS)/filter.done
+_DEDUP              := $(STAMPS)/dedup.done
+_REORDER            := $(STAMPS)/reorder.done
+_STEREO_FILTER      := $(STAMPS)/stereo_filter.done
+_VALIDATE           := $(STAMPS)/validate.done
+_STATS              := $(STAMPS)/stats.done
+_EXTXYZ             := $(STAMPS)/extxyz.done
+_ENERGY_PREFILTER   := $(STAMPS)/energy_prefilter.done
 
 # ── Default target ────────────────────────────────────────────────────────────
-.PHONY: all timed sample parse filter dedup reorder stereo_filter validate stats extxyz check-template clean-stamps clean-sample guard-qtcovi help
-all: guard-qtcovi extxyz
+.PHONY: all timed sample parse filter dedup reorder stereo_filter validate stats extxyz energy_prefilter selection check-template clean-stamps clean-sample guard-qtcovi help
+all: guard-qtcovi extxyz energy_prefilter
 
 # ── Host guard (WORKERS > 1 requires qtcovi02) ───────────────────────────────
 guard-qtcovi:
@@ -192,30 +193,22 @@ $(_VALIDATE): $(_DEDUP)
 	@touch $@
 
 # ── Stage 7: stats ────────────────────────────────────────────────────────────
-# Three scripts run sequentially:
-#   stats_qm40.py        → qm40_stats.csv, histograms  (~80 min full data, 1 worker)
-#   stats_qm40_chiral.py → qm40_stats_chiral.csv, histograms
-#   check_stereo_pairs.py → stereo_pairs.tsv, structural_twins.tsv
+# Two scripts run sequentially:
+#   stats_qm40.py --chiral → qm40_stats.csv (with max_tanimoto + max_tanimoto_chiral), histograms
+#   check_stereo_pairs.py  → stereo_pairs.tsv, structural_twins.tsv
 stats: $(_STATS)
 
 $(_STATS): $(_STEREO_FILTER)
 	@echo ""
 	@echo "==> [7/8] stats — descriptors, Tanimoto similarity, stereo pairs"
-	@echo "    [7a] stats_qm40.py (non-chiral FP)"
+	@echo "    [7a] stats_qm40.py (non-chiral + chiral FP)"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
-	 $(PYTHON) 03-stats/stats_qm40.py $(FLAG) --workers $(WORKERS); \
+	 $(PYTHON) 03-stats/stats_qm40.py $(FLAG) --workers $(WORKERS) --chiral; \
 	 rc=$$?; elapsed=$$(( $$(date +%s) - start )); \
 	 echo "    Finished: $$(date '+%Y-%m-%d %H:%M:%S')  [elapsed: $${elapsed}s]"; \
 	 exit $$rc
-	@echo "    [7b] stats_qm40_chiral.py (chiral FP)"
-	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
-	@start=$$(date +%s); \
-	 $(PYTHON) 03-stats/stats_qm40_chiral.py $(FLAG) --workers $(WORKERS); \
-	 rc=$$?; elapsed=$$(( $$(date +%s) - start )); \
-	 echo "    Finished: $$(date '+%Y-%m-%d %H:%M:%S')  [elapsed: $${elapsed}s]"; \
-	 exit $$rc
-	@echo "    [7c] check_stereo_pairs.py"
+	@echo "    [7b] check_stereo_pairs.py"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 03-stats/check_stereo_pairs.py $(FLAG); \
@@ -240,6 +233,30 @@ $(_EXTXYZ): $(_STATS)
 	 echo "    Finished: $$(date '+%Y-%m-%d %H:%M:%S')  [elapsed: $${elapsed}s]"; \
 	 exit $$rc
 	@touch $@
+
+# ── Stage 9: energy_prefilter ────────────────────────────────────────────────
+# QM40-specific energy outlier detection (atom-type OLS regression, residual z-score).
+# Reads stats/qm40_stats.csv → writes stats/qm40_energy_status.csv.
+# prepare_input.py reads this file and applies energy_status != "flagged" filter.
+# In --sample mode: exits gracefully if Internal_E(0K) absent in sample stats.
+energy_prefilter: $(_ENERGY_PREFILTER)
+
+$(_ENERGY_PREFILTER): $(_STATS)
+	@echo ""
+	@echo "==> [9/9] energy_prefilter — QM40 energy outlier detection (atom-type OLS regression)"
+	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
+	@start=$$(date +%s); \
+	 $(PYTHON) 05-selection/energy_prefilter_qm40.py $(FLAG); \
+	 rc=$$?; elapsed=$$(( $$(date +%s) - start )); \
+	 echo "    Finished: $$(date '+%Y-%m-%d %H:%M:%S')  [elapsed: $${elapsed}s]"; \
+	 exit $$rc
+	@touch $@
+
+# ── Selection pipeline (05-selection/) ───────────────────────────────────────
+# Delegates to 05-selection/Makefile. Prerequisites: stages 1-9 complete.
+# Not included in `all` — selection depends on D21/D22 supervisor decisions.
+selection:
+	@$(MAKE) -C 05-selection/
 
 # ── One-time QA (no stamp — always re-runs when called) ──────────────────────
 # Checks whether SMILES-template fallback molecules are aromatic-S (safe) or
@@ -268,7 +285,7 @@ help:
 	@echo "QM40 → AIM4ML pipeline  |  run from: scripts/"
 	@echo "Usage: make [target] [FLAG=--full-data] [WORKERS=1]"
 	@echo ""
-	@echo "  all              Full pipeline: [sample →] parse → filter → dedup → validate → reorder → stereo_filter → stats → extxyz"
+	@echo "  all              Full pipeline: [sample →] parse → filter → dedup → validate → reorder → stereo_filter → stats → extxyz + energy_prefilter"
 	@echo "  timed            Same as all + total elapsed summary at end"
 	@echo "  sample           Stage 0 — extract 200-mol sample CSVs (FLAG=--sample only)"
 	@echo "  parse            Stage 1 — extract XYZ files from xyz.csv                          (~8 min)"
@@ -279,6 +296,8 @@ help:
 	@echo "  stereo_filter    Stage 6 — D09 enantiomer filter (SMILES-based)"
 	@echo "  stats            Stage 7 — descriptors, Tanimoto, stereo pairs                     (~80 min, 1 worker)"
 	@echo "  extxyz           Stage 8 — D18 extxyz trajectory batches (5000 mol/file)"
+	@echo "  energy_prefilter Stage 9 — QM40 energy outlier detection (atom-type OLS regression)"
+	@echo "  selection        Delegate to 05-selection/Makefile (prepare_input → scaffold_groups)"
 	@echo "  check-template   One-time QA — tautomer risk in template fallback"
 	@echo "  clean-stamps     Remove full-data stamps → force full re-run"
 	@echo "  clean-sample     Remove entire sample dir (stamps + all generated files)"

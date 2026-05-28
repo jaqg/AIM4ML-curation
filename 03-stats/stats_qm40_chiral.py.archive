@@ -12,6 +12,12 @@ were stereo pairs — a measurement artifact of non-chiral FP, not real redundan
 This script corrects that. Outputs go to separate files (qm40_stats_chiral.csv,
 plots/hist_tanimoto_chiral.pdf) so the original run is not overwritten.
 
+QM properties joined from filtered_main.csv (join key: Zinc_id):
+  - Internal_E(0K), HOMO, LUMO, HL_gap
+
+Curation status columns passed through from qm40_mapping.csv:
+  - sdf_status, reorder_status, stereo_status
+
 Usage:
     python3 stats_qm40_chiral.py               # local sample (default)
     python3 stats_qm40_chiral.py --full-data   # full dataset on cluster
@@ -29,17 +35,21 @@ from tqdm import tqdm
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, rdMolDescriptors, rdFingerprintGenerator
 
+QM_PROPS = ["Internal_E(0K)", "HOMO", "LUMO", "HL_gap"]
+
 # --- Paths -------------------------------------------------------------------
 PATHS = {
     "sample": {
-        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
-        "stats_csv":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_stats_chiral.csv",
-        "plots_dir":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/plots",
+        "mapping_csv":       "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
+        "filtered_main_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/filtered_sample_main.csv",
+        "stats_csv":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_stats_chiral.csv",
+        "plots_dir":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/plots",
     },
     "full": {
-        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/qm40_mapping.csv",
-        "stats_csv":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/qm40_stats_chiral.csv",
-        "plots_dir":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/plots",
+        "mapping_csv":       "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/qm40_mapping.csv",
+        "filtered_main_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/filtered_main.csv",
+        "stats_csv":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/qm40_stats_chiral.csv",
+        "plots_dir":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/plots",
     },
 }
 # -----------------------------------------------------------------------------
@@ -187,9 +197,10 @@ def main():
     n_workers = args.workers
     paths = PATHS[mode]
 
-    MAPPING_CSV = paths["mapping_csv"]
-    STATS_CSV   = paths["stats_csv"]
-    PLOTS_DIR   = paths["plots_dir"]
+    MAPPING_CSV       = paths["mapping_csv"]
+    FILTERED_MAIN_CSV = paths["filtered_main_csv"]
+    STATS_CSV         = paths["stats_csv"]
+    PLOTS_DIR         = paths["plots_dir"]
 
     print(f"Mode: {mode}")
     os.makedirs(PLOTS_DIR, exist_ok=True)
@@ -201,6 +212,16 @@ def main():
     mapping_df = pd.read_csv(MAPPING_CSV)
     n_total    = len(mapping_df)
     print(f"  {n_total} molecules loaded.")
+
+    # -------------------------------------------------------------------------
+    # Load QM properties from filtered_main.csv (join on Zinc_id)
+    # -------------------------------------------------------------------------
+    print(f"Reading QM properties from {FILTERED_MAIN_CSV} ...")
+    qm_df = pd.read_csv(FILTERED_MAIN_CSV, usecols=["Zinc_id"] + QM_PROPS)
+    mapping_df = mapping_df.merge(qm_df, on="Zinc_id", how="left")
+    n_missing_qm = mapping_df[QM_PROPS[0]].isna().sum()
+    if n_missing_qm:
+        print(f"  WARNING: {n_missing_qm} molecules have no QM properties (not in filtered_main.csv).")
 
     smiles_list = mapping_df["canonical_SMILES"].tolist()
 
@@ -229,9 +250,13 @@ def main():
     stats_df["TPSA"]         = tpsa_list
     stats_df["max_tanimoto"] = max_tanimoto
 
-    # Reorder columns to match dashboard spec: ID, ICONF, SMILES, NAT, charge, TPSA, ...
-    col_order = ["ID", "ICONF", "Zinc_id", "canonical_SMILES", "NAT",
-                 "charge", "MolWt", "TPSA", "max_tanimoto"]
+    col_order = [
+        "ID", "ICONF", "Zinc_id", "canonical_SMILES", "NAT",
+        "charge", "MolWt", "TPSA",
+        "Internal_E(0K)", "HOMO", "LUMO", "HL_gap",
+        "max_tanimoto",
+        "sdf_status", "reorder_status", "stereo_status",
+    ]
     stats_df = stats_df[col_order]
     stats_df.to_csv(STATS_CSV, index=False)
     print(f"\nStats CSV written: {STATS_CSV}")
@@ -266,6 +291,15 @@ def main():
         path=os.path.join(PLOTS_DIR, "hist_tanimoto_chiral.pdf"),
         bins=50,
         color="#C44E52",
+    )
+
+    save_histogram(
+        stats_df["Internal_E(0K)"].tolist(),
+        xlabel="Internal energy at 0 K (Ha)",
+        title=f"QM40 — DFT internal energy distribution (N={n_total})",
+        path=os.path.join(PLOTS_DIR, "hist_energy_chiral.pdf"),
+        bins=50,
+        color="#8172B2",
     )
 
     # -------------------------------------------------------------------------

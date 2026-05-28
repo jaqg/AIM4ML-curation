@@ -2,21 +2,33 @@
 """
 stats_qm40.py — Compute per-molecule descriptors and diversity statistics for QM40.
 
-Reads qm40_mapping.csv (output of dedup_qm40.py) and produces:
-  - qm40_stats.csv: master CSV with per-molecule descriptors
-  - plots/hist_nat.pdf, plots/hist_tpsa.pdf, plots/hist_tanimoto.pdf
+Reads qm40_mapping.csv + filtered_main.csv and produces:
+  - qm40_stats.csv: master CSV with per-molecule descriptors and QM properties
+  - plots/hist_nat.pdf, plots/hist_tpsa.pdf, plots/hist_tanimoto.pdf,
+    plots/hist_energy.pdf
 
-Descriptors computed:
+Descriptors computed from SMILES:
   - MolWt        : molecular weight (RDKit, includes H)
   - TPSA         : topological polar surface area (Å²)
+  - logP         : Wildman-Crippen logP
+  - nrot         : number of rotatable bonds (RDKit default definition)
   - charge       : formal molecular charge (0 for all QM40 — neutral singlets)
-  - max_tanimoto : nearest-neighbour Tanimoto similarity (Morgan FP, r=2, 2048 bits)
-                   For each molecule, the maximum Tanimoto to any other molecule.
-                   Useful for: near-duplicate detection (>0.85) and diversity assessment.
+  - max_tanimoto       : nearest-neighbour Tanimoto similarity (Morgan FP, r=2, 2048 bits)
+  - max_tanimoto_chiral: same with includeChirality=True (optional, --chiral flag)
+
+QM properties joined from filtered_main.csv (join key: Zinc_id):
+  - Internal_E(0K) : DFT internal energy at 0 K
+  - HOMO           : HOMO energy
+  - LUMO           : LUMO energy
+  - HL_gap         : HOMO-LUMO gap
+
+Curation status columns passed through from qm40_mapping.csv:
+  - sdf_status, reorder_status, stereo_status
 
 Usage:
     python3 stats_qm40.py               # local sample (default)
     python3 stats_qm40.py --full-data   # full dataset on cluster
+    python3 stats_qm40.py --chiral      # also compute chirality-aware Tanimoto
 """
 
 import os
@@ -29,19 +41,23 @@ matplotlib.use("Agg")   # non-interactive backend — required for cluster (no d
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from rdkit import Chem, DataStructs
-from rdkit.Chem import Descriptors, rdMolDescriptors, rdFingerprintGenerator
+from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors, rdFingerprintGenerator
 
 # --- Paths -------------------------------------------------------------------
+QM_PROPS = ["Internal_E(0K)", "HOMO", "LUMO", "HL_gap"]
+
 PATHS = {
     "sample": {
-        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
-        "stats_csv":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_stats.csv",
-        "plots_dir":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/plots",
+        "mapping_csv":       "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_mapping.csv",
+        "filtered_main_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/filtered_sample_main.csv",
+        "stats_csv":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/qm40_stats.csv",
+        "plots_dir":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/samples/plots",
     },
     "full": {
-        "mapping_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/qm40_mapping.csv",
-        "stats_csv":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/qm40_stats.csv",
-        "plots_dir":   "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/plots",
+        "mapping_csv":       "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/qm40_mapping.csv",
+        "filtered_main_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/filtered_main.csv",
+        "stats_csv":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/qm40_stats.csv",
+        "plots_dir":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/plots",
     },
 }
 # -----------------------------------------------------------------------------
@@ -65,59 +81,72 @@ def parse_args():
         default=1,
         help="Number of parallel workers for Tanimoto NN computation (default: 1).",
     )
+    parser.add_argument(
+        "--chiral",
+        action="store_true",
+        help="Also compute chirality-aware Tanimoto NN (second FP pass, adds max_tanimoto_chiral column).",
+    )
     return parser.parse_args()
 
 
 def compute_descriptors(smiles_list):
     """
-    Compute MolWt and TPSA for each SMILES string.
-    Returns two lists (molwt, tpsa), with None for molecules that fail to parse.
+    Compute MolWt, TPSA, logP, and nrot for each SMILES string.
+    Returns four lists, with None for molecules that fail to parse.
     """
     molwt_list = []
     tpsa_list  = []
+    logp_list  = []
+    nrot_list  = []
     for smi in tqdm(smiles_list, desc="Descriptors", unit="mol"):
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
             molwt_list.append(None)
             tpsa_list.append(None)
+            logp_list.append(None)
+            nrot_list.append(None)
         else:
             molwt_list.append(Descriptors.MolWt(mol))
             tpsa_list.append(rdMolDescriptors.CalcTPSA(mol))
-    return molwt_list, tpsa_list
+            logp_list.append(Crippen.MolLogP(mol))
+            nrot_list.append(rdMolDescriptors.CalcNumRotatableBonds(mol))
+    return molwt_list, tpsa_list, logp_list, nrot_list
 
 
-_MORGAN_GEN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+_MORGAN_GEN       = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+_MORGAN_GEN_CHIRAL = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048, includeChirality=True)
 
 
-def compute_fingerprints(smiles_list):
+def compute_fingerprints(smiles_list, gen=_MORGAN_GEN, desc="Fingerprints"):
     """
-    Compute Morgan fingerprints (radius=2, nBits=2048) for all SMILES.
+    Compute Morgan fingerprints for all SMILES using the given generator.
     Returns a list of RDKit ExplicitBitVect objects (None for parse failures).
     """
     fps = []
-    for smi in tqdm(smiles_list, desc="Fingerprints", unit="mol"):
+    for smi in tqdm(smiles_list, desc=desc, unit="mol"):
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
             fps.append(None)
         else:
-            fps.append(_MORGAN_GEN.GetFingerprint(mol))
+            fps.append(gen.GetFingerprint(mol))
     return fps
 
 
 # Module-level globals so forked workers inherit fp_matrix/popcounts without pickling.
-_FP_MATRIX  = None
-_POPCOUNTS  = None
+_FP_MATRIX  = None  # shape (n_valid, 2048), dtype uint8 --- each row = binary fingerprint of one mol
+_POPCOUNTS  = None  # shape (n_valid,) --- popcount (population count: number of bits equal to 1 in a binary vector) per mol
+#                                                   equiv to |A|
 
 
 def _tanimoto_chunk(indices):
     """Worker: compute max Tanimoto for a chunk of row indices against the full fp matrix."""
     results = []
     for j in indices:
-        intersections = _FP_MATRIX[j].dot(_FP_MATRIX.T)
-        unions = _POPCOUNTS[j] + _POPCOUNTS - intersections
-        sims = np.where(unions > 0, intersections / unions, 0.0)
-        sims[j] = 0.0  # exclude self
-        results.append((j, float(sims.max()) if len(sims) > 1 else 0.0))
+        intersections = _FP_MATRIX[j].dot(_FP_MATRIX.T)  # count of bits set in both j and i = |A ∩ B|
+        unions = _POPCOUNTS[j] + _POPCOUNTS - intersections  # inclusion-exclusion: |A| + |B_i| − |A ∩ B_i| = |A ∪ B_i|
+        sims = np.where(unions > 0, intersections / unions, 0.0)  # Tanimoto = |A ∩ B| / |A ∪ B|
+        sims[j] = 0.0  # exclude self-similarity (= 1.0)
+        results.append((j, float(sims.max()) if len(sims) > 1 else 0.0))  # Append nearest-neighbour Tanimoto (max) for mol j
     return results
 
 
@@ -185,13 +214,15 @@ def save_histogram(values, xlabel, title, path, bins=50, color="#4C72B0"):
 
 def main():
     args      = parse_args()
-    mode = "full" if args.full_data else "sample"
+    mode      = "full" if args.full_data else "sample"
     n_workers = args.workers
+    do_chiral = args.chiral
     paths = PATHS[mode]
 
-    MAPPING_CSV = paths["mapping_csv"]
-    STATS_CSV   = paths["stats_csv"]
-    PLOTS_DIR   = paths["plots_dir"]
+    MAPPING_CSV       = paths["mapping_csv"]
+    FILTERED_MAIN_CSV = paths["filtered_main_csv"]
+    STATS_CSV         = paths["stats_csv"]
+    PLOTS_DIR         = paths["plots_dir"]
 
     print(f"Mode: {mode}")
     os.makedirs(PLOTS_DIR, exist_ok=True)
@@ -204,22 +235,38 @@ def main():
     n_total    = len(mapping_df)
     print(f"  {n_total} molecules loaded.")
 
+    # -------------------------------------------------------------------------
+    # Load QM properties from filtered_main.csv (join on Zinc_id)
+    # -------------------------------------------------------------------------
+    print(f"Reading QM properties from {FILTERED_MAIN_CSV} ...")
+    qm_df = pd.read_csv(FILTERED_MAIN_CSV, usecols=["Zinc_id"] + QM_PROPS)
+    mapping_df = mapping_df.merge(qm_df, on="Zinc_id", how="left")
+    n_missing_qm = mapping_df[QM_PROPS[0]].isna().sum()
+    if n_missing_qm:
+        print(f"  WARNING: {n_missing_qm} molecules have no QM properties (not in filtered_main.csv).")
+
     smiles_list = mapping_df["canonical_SMILES"].tolist()
 
     # -------------------------------------------------------------------------
     # Step 1 — per-molecule descriptors
     # -------------------------------------------------------------------------
-    molwt_list, tpsa_list = compute_descriptors(smiles_list)
+    molwt_list, tpsa_list, logp_list, nrot_list = compute_descriptors(smiles_list)
 
     n_failed = sum(1 for v in tpsa_list if v is None)
     if n_failed:
         print(f"  WARNING: {n_failed} molecules failed descriptor computation (unparseable SMILES).")
 
     # -------------------------------------------------------------------------
-    # Step 2 — nearest-neighbour Tanimoto
+    # Step 2 — nearest-neighbour Tanimoto (non-chiral)
     # -------------------------------------------------------------------------
     fps = compute_fingerprints(smiles_list)
     max_tanimoto = compute_nearest_neighbour_tanimoto(fps, n_total, n_workers=n_workers)
+
+    # Step 2b — chirality-aware Tanimoto (optional)
+    if do_chiral:
+        print("\nStep 2b: chirality-aware Tanimoto NN ...")
+        fps_chiral = compute_fingerprints(smiles_list, gen=_MORGAN_GEN_CHIRAL, desc="Fingerprints (chiral)")
+        max_tanimoto_chiral = compute_nearest_neighbour_tanimoto(fps_chiral, n_total, n_workers=n_workers)
 
     # -------------------------------------------------------------------------
     # Step 3 — build and write master stats CSV
@@ -229,11 +276,20 @@ def main():
     stats_df["charge"]       = 0
     stats_df["MolWt"]        = molwt_list
     stats_df["TPSA"]         = tpsa_list
+    stats_df["logP"]         = logp_list
+    stats_df["nrot"]         = nrot_list
     stats_df["max_tanimoto"] = max_tanimoto
+    if do_chiral:
+        stats_df["max_tanimoto_chiral"] = max_tanimoto_chiral
 
-    # Reorder columns to match dashboard spec: ID, ICONF, SMILES, NAT, charge, TPSA, ...
-    col_order = ["ID", "ICONF", "Zinc_id", "canonical_SMILES", "NAT",
-                 "charge", "MolWt", "TPSA", "max_tanimoto"]
+    col_order = [
+        "ID", "ICONF", "Zinc_id", "canonical_SMILES", "NAT",
+        "charge", "MolWt", "TPSA", "logP", "nrot",
+        "Internal_E(0K)", "HOMO", "LUMO", "HL_gap",
+        "max_tanimoto",
+        *(["max_tanimoto_chiral"] if do_chiral else []),
+        "sdf_status", "reorder_status", "stereo_status",
+    ]
     stats_df = stats_df[col_order]
     stats_df.to_csv(STATS_CSV, index=False)
     print(f"\nStats CSV written: {STATS_CSV}")
@@ -270,6 +326,25 @@ def main():
         color="#C44E52",
     )
 
+    if do_chiral:
+        save_histogram(
+            stats_df["max_tanimoto_chiral"].tolist(),
+            xlabel="Nearest-neighbour Tanimoto (Morgan r=2, 2048 bits, chiral)",
+            title=f"QM40 — Chemical diversity, chiral FP (N={n_total})",
+            path=os.path.join(PLOTS_DIR, "hist_tanimoto_chiral.pdf"),
+            bins=50,
+            color="#DD8452",
+        )
+
+    save_histogram(
+        stats_df["Internal_E(0K)"].tolist(),
+        xlabel="Internal energy at 0 K (Ha)",
+        title=f"QM40 — DFT internal energy distribution (N={n_total})",
+        path=os.path.join(PLOTS_DIR, "hist_energy.pdf"),
+        bins=50,
+        color="#8172B2",
+    )
+
     # -------------------------------------------------------------------------
     # Summary
     # -------------------------------------------------------------------------
@@ -280,14 +355,18 @@ def main():
     print(f"  Plots:            {PLOTS_DIR}/")
 
     # Quick diversity report
-    tan = stats_df["max_tanimoto"].dropna()
-    if len(tan) > 0:
-        n_near_dupes = (tan > 0.85).sum()
-        print(f"\n  Tanimoto summary:")
-        print(f"    Mean:             {tan.mean():.3f}")
-        print(f"    Median:           {tan.median():.3f}")
-        print(f"    Max:              {tan.max():.3f}")
-        print(f"    Near-duplicates (>0.85): {n_near_dupes} ({100*n_near_dupes/len(tan):.1f}%)")
+    for col, label in [
+        ("max_tanimoto",       "non-chiral"),
+        *([("max_tanimoto_chiral", "chiral")] if do_chiral else []),
+    ]:
+        tan = stats_df[col].dropna()
+        if len(tan) > 0:
+            n_near_dupes = (tan > 0.85).sum()
+            print(f"\n  Tanimoto summary ({label}):")
+            print(f"    Mean:                    {tan.mean():.3f}")
+            print(f"    Median:                  {tan.median():.3f}")
+            print(f"    Max:                     {tan.max():.3f}")
+            print(f"    Near-duplicates (>0.85): {n_near_dupes} ({100*n_near_dupes/len(tan):.1f}%)")
 
 
 if __name__ == "__main__":
