@@ -25,14 +25,12 @@ Usage:
 """
 
 import argparse
-import hashlib
 import sys
 from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 from rdkit import Chem, RDLogger
-from rdkit.Chem import Crippen, rdMolDescriptors
 from tqdm import tqdm
 
 RDLogger.DisableLog("rdApp.*")
@@ -53,7 +51,7 @@ PATHS = {
         "filtered_main_csv": "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/filtered_main.csv",
         "stats_csv":         "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/stats/qm40_stats.csv",
         "mol_dir":           "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/mol_files",
-        "out_dir":           "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/04-extxyz",
+        "out_dir":           "/datos_pool/mldata1/QMdatasets/QM40/AIM4ML/extxyz",
     },
 }
 
@@ -83,11 +81,6 @@ def parse_xyz(path):
         parts = line.split()
         atoms.append((parts[0], float(parts[1]), float(parts[2]), float(parts[3])))
     return nat, atoms
-
-
-def md5_hex(smiles):
-    return hashlib.md5(smiles.encode()).hexdigest()
-
 
 def build_title_line(zinc_id, formula, nat, cnso, chrg, e, idsml, smiles, tpsa, logp, nrot):
     return (
@@ -121,9 +114,11 @@ def main():
     args = parse_args()
     p = PATHS["full" if args.full_data else "sample"]
 
-    mol_dir = Path(p["mol_dir"])
-    out_dir = Path(p["out_dir"])
+    mol_dir  = Path(p["mol_dir"])
+    out_dir  = Path(p["out_dir"])
+    logs_dir = out_dir.parent / "logs"
     out_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     mapping = pd.read_csv(p["mapping_csv"])
     for col in ("reorder_status", "stereo_status"):
@@ -134,7 +129,7 @@ def main():
     stats_df = pd.read_csv(p["stats_csv"])
 
     energy = main_df.set_index("Zinc_id")["Internal_E(0K)"].to_dict()
-    stats = stats_df.set_index("ID")[["TPSA", "charge"]].to_dict("index")
+    stats = stats_df.set_index("ID")[["TPSA", "charge", "logP", "nrot"]].to_dict("index")
 
     kept = mapping[
         (mapping["reorder_status"] == "success") &
@@ -174,7 +169,7 @@ def main():
         atom_counts = Counter(a[0] for a in atoms)
         formula = hill_formula(atom_counts)
         cnso = sum(atom_counts.get(e, 0) for e in CNSO_ELEMENTS)
-        idsml = md5_hex(smiles)
+        idsml = row["ID"]
 
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
@@ -182,9 +177,9 @@ def main():
             n_skipped += 1
             continue
 
-        logp = Crippen.MolLogP(mol)
-        nrot = rdMolDescriptors.CalcNumRotatableBonds(mol)
         tpsa = stats[mol_id]["TPSA"]
+        logp = stats[mol_id]["logP"]
+        nrot = int(stats[mol_id]["nrot"])
         chrg = int(stats[mol_id]["charge"])
         e    = energy[zinc_id]
 
@@ -202,12 +197,12 @@ def main():
         write_batch(out_dir, batch_idx, batch_buf)
 
     if skip_log:
-        skip_path = out_dir / "extxyz_skipped.csv"
+        skip_path = logs_dir / "extxyz_skipped.csv"
         pd.DataFrame(skip_log, columns=["Zinc_id", "ID", "reason"]).to_csv(skip_path, index=False)
 
     n_batches = batch_idx - 1 if not batch_buf else batch_idx
     print(f"Written : {n_written}")
-    print(f"Skipped : {n_skipped}" + (f" → {out_dir}/extxyz_skipped.csv" if skip_log else ""))
+    print(f"Skipped : {n_skipped}" + (f" → {skip_path}" if skip_log else ""))
     print(f"Batches : {n_batches}")
 
 
