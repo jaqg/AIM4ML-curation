@@ -352,6 +352,11 @@ def main():
     print(f"Reading {MAIN_CSV} ...")
     main_df = pd.read_csv(MAIN_CSV)
 
+    if "energy_status" in main_df.columns:
+        n_before = len(main_df)
+        main_df = main_df[main_df["energy_status"] == "ok"].copy()
+        print(f"  Energy filter: {n_before - len(main_df)} flagged removed ({len(main_df)} remain)")
+
     # -------------------------------------------------------------------------
     # Step 1 — conformer check
     # -------------------------------------------------------------------------

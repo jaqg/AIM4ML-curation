@@ -83,18 +83,18 @@ def reorder_xyz(xyz_path):
 
 
 def _reorder_one(args):
-    """Worker: reorder one molecule. Returns (row_idx, status, row_dict_or_None)."""
-    row_idx, xyz_path, sdf_path, row_dict = args
+    """Worker: reorder one molecule. Returns (mol_id, status, row_dict_or_None)."""
+    mol_id, xyz_path, sdf_path, row_dict = args
     if not os.path.exists(xyz_path):
-        return row_idx, "missing", None
+        return mol_id, "missing", None
     success = reorder_xyz(xyz_path)
     if success:
-        return row_idx, "success", None
+        return mol_id, "success", None
     orig_path = xyz_path + "_ORIG"
     for path in (orig_path, sdf_path):
         if os.path.exists(path):
             os.remove(path)
-    return row_idx, "failed", row_dict
+    return mol_id, "failed", row_dict
 
 
 def main():
@@ -114,41 +114,48 @@ def main():
     print(f"Reading {MAPPING_CSV} ...")
     mapping_df = pd.read_csv(MAPPING_CSV)
     n_total = len(mapping_df)
-    print(f"  {n_total} molecules")
+
+    all_ids    = set(mapping_df["ID"])
+    to_process = mapping_df[mapping_df["stereo_status"] == "kept"].copy()
+    n_process  = len(to_process)
+    n_skip     = n_total - n_process
+    print(f"  {n_total} total, {n_process} to process (stereo_status==kept), {n_skip} skipped")
 
     print(f"\nReordering atoms (AMBER canonical, D17) — {n_workers} worker(s) ...")
 
     work_items = []
-    for idx, (_, row) in enumerate(mapping_df.iterrows()):
-        cid      = row["ID"]
+    for _, row in to_process.iterrows():
+        mol_id   = row["ID"]
         iconf    = row["ICONF"]
-        xyz_path = os.path.join(MOL_DIR, f"mol_{cid}_{iconf}.xyz")
-        sdf_path = os.path.join(MOL_DIR, f"mol_{cid}_{iconf}.sdf")
-        work_items.append((idx, xyz_path, sdf_path, row.to_dict()))
+        xyz_path = os.path.join(MOL_DIR, f"mol_{mol_id}_{iconf}.xyz")
+        sdf_path = os.path.join(MOL_DIR, f"mol_{mol_id}_{iconf}.sdf")
+        work_items.append((mol_id, xyz_path, sdf_path, row.to_dict()))
 
-    results = [None] * n_total
+    status_by_id = {mol_id: "skipped" for mol_id in all_ids}
+    failed = []
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_reorder_one, item): item[0] for item in work_items}
-        for future in tqdm(as_completed(futures), total=n_total, desc="Reordering", unit="mol", file=sys.stdout):
-            row_idx, status, row_dict = future.result()
-            results[row_idx] = (status, row_dict)
+        for future in tqdm(as_completed(futures), total=n_process, desc="Reordering", unit="mol", file=sys.stdout):
+            mol_id, status, row_dict = future.result()
+            status_by_id[mol_id] = status
+            if row_dict is not None:
+                failed.append(row_dict)
 
-    statuses = [r[0] for r in results]
-    failed   = [r[1] for r in results if r[1] is not None]
-
-    mapping_df["reorder_status"] = statuses
+    mapping_df["reorder_status"] = mapping_df["ID"].map(status_by_id)
     mapping_df.to_csv(MAPPING_CSV, index=False)
 
-    n_success      = statuses.count("success")
-    n_failed  = statuses.count("failed")
-    n_missing = statuses.count("missing")
+    n_success = sum(1 for s in status_by_id.values() if s == "success")
+    n_failed  = sum(1 for s in status_by_id.values() if s == "failed")
+    n_missing = sum(1 for s in status_by_id.values() if s == "missing")
+    n_skipped = sum(1 for s in status_by_id.values() if s == "skipped")
 
     print(f"\nDone.")
     print(f"  Reordered success: {n_success}")
     print(f"  Failed:       {n_failed}")
     if n_missing:
         print(f"  Missing XYZ:  {n_missing}  (unexpected — check dedup output)")
+    print(f"  Skipped (enantiomers): {n_skipped}")
     print(f"  Mapping  →  {MAPPING_CSV}  (reorder_status column added)")
 
     if failed:

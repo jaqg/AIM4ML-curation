@@ -7,7 +7,7 @@
 #   make FLAG=--sample → run on cluster sample (absolute paths, script default)
 #
 # Dependency chain:
-#   parse → filter → dedup → validate → reorder → stereo_filter → stats → extxyz
+#   parse → filter → energy_prefilter → dedup → validate → stereo_filter → reorder → stats → extxyz
 #
 # Stamp files in $(STAMPS)/ track which stages have completed.
 # make only re-runs a stage if its stamp is missing or its dependency changed.
@@ -48,7 +48,7 @@ _ENERGY_PREFILTER   := $(STAMPS)/energy_prefilter.done
 
 # ── Default target ────────────────────────────────────────────────────────────
 .PHONY: all timed sample parse filter dedup reorder stereo_filter validate stats extxyz energy_prefilter selection check-template clean-stamps clean-sample guard-qtcovi help
-all: guard-qtcovi extxyz energy_prefilter
+all: guard-qtcovi extxyz
 
 # ── Host guard (WORKERS > 1 requires qtcovi02) ───────────────────────────────
 guard-qtcovi:
@@ -83,7 +83,7 @@ sample: $(_SAMPLE)
 
 $(_SAMPLE): | $(STAMPS)
 	@echo ""
-	@echo "==> [0/8] sample — extracting 200-molecule sample from full QM40 data"
+	@echo "==> [0/9] sample — extracting 200-molecule sample from full QM40 data"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 00-utils/sample_qm40.py; \
@@ -102,7 +102,7 @@ parse: $(_PARSE)
 
 $(_PARSE): $(_SAMPLE) | $(STAMPS)
 	@echo ""
-	@echo "==> [1/8] parse — extracting XYZ files from xyz.csv"
+	@echo "==> [1/9] parse — extracting XYZ files from xyz.csv"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 01-parse/parse_qm40.py $(FLAG); \
@@ -118,7 +118,7 @@ filter: $(_FILTER)
 
 $(_FILTER): $(_PARSE)
 	@echo ""
-	@echo "==> [2/8] filter — D16 curation filter (neutral + closed-shell)"
+	@echo "==> [2/9] filter — D16 curation filter (neutral + closed-shell)"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 00-utils/filter_qm40.py $(FLAG); \
@@ -132,9 +132,9 @@ $(_FILTER): $(_PARSE)
 # Writes mol_files/, qm40_mapping.csv, logs/
 dedup: $(_DEDUP)
 
-$(_DEDUP): $(_FILTER)
+$(_DEDUP): $(_ENERGY_PREFILTER)
 	@echo ""
-	@echo "==> [3/8] dedup — assigning compound IDs, building SDF files"
+	@echo "==> [4/9] dedup — assigning compound IDs, building SDF files"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 02-dedup/dedup_qm40.py $(FLAG) 2>/dev/null; \
@@ -149,9 +149,9 @@ $(_DEDUP): $(_FILTER)
 # Updates qm40_mapping.csv with reorder_status column.
 reorder: $(_REORDER)
 
-$(_REORDER): $(_VALIDATE)
+$(_REORDER): $(_STEREO_FILTER)
 	@echo ""
-	@echo "==> [5/8] reorder — AMBER canonical atom ordering (D17)"
+	@echo "==> [7/9] reorder — AMBER canonical atom ordering (D17)"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 00-utils/reorder_qm40.py $(FLAG) --workers $(WORKERS); \
@@ -166,9 +166,9 @@ $(_REORDER): $(_VALIDATE)
 # Marks removed_enantiomer entries; does NOT delete files (reversible policy).
 stereo_filter: $(_STEREO_FILTER)
 
-$(_STEREO_FILTER): $(_REORDER)
+$(_STEREO_FILTER): $(_VALIDATE)
 	@echo ""
-	@echo "==> [6/8] stereo_filter — D09 enantiomer filter (SMILES-based)"
+	@echo "==> [6/9] stereo_filter — D09 enantiomer filter (SMILES-based)"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 00-utils/stereo_filter_qm40.py $(FLAG); \
@@ -183,7 +183,7 @@ validate: $(_VALIDATE)
 
 $(_VALIDATE): $(_DEDUP)
 	@echo ""
-	@echo "==> [4/8] validate — checking dedup output integrity vs xyz.csv"
+	@echo "==> [5/9] validate — checking dedup output integrity vs xyz.csv"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 00-utils/validate_qm40.py $(FLAG); \
@@ -198,9 +198,9 @@ $(_VALIDATE): $(_DEDUP)
 #   check_stereo_pairs.py  → stereo_pairs.tsv, structural_twins.tsv
 stats: $(_STATS)
 
-$(_STATS): $(_STEREO_FILTER)
+$(_STATS): $(_REORDER)
 	@echo ""
-	@echo "==> [7/8] stats — descriptors, Tanimoto similarity, stereo pairs"
+	@echo "==> [8/9] stats — descriptors, Tanimoto similarity, stereo pairs"
 	@echo "    [7a] stats_qm40.py (non-chiral + chiral FP)"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
@@ -225,7 +225,7 @@ extxyz: $(_EXTXYZ)
 
 $(_EXTXYZ): $(_STATS)
 	@echo ""
-	@echo "==> [8/8] extxyz — D18 building extxyz trajectory batches"
+	@echo "==> [9/9] extxyz — D18 building extxyz trajectory batches"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
 	 $(PYTHON) 04-extxyz/build_extxyz_qm40.py $(FLAG); \
@@ -234,19 +234,19 @@ $(_EXTXYZ): $(_STATS)
 	 exit $$rc
 	@touch $@
 
-# ── Stage 9: energy_prefilter ────────────────────────────────────────────────
+# ── Stage 3: energy_prefilter ────────────────────────────────────────────────
 # QM40-specific energy outlier detection (atom-type OLS regression, residual z-score).
-# Reads stats/qm40_stats.csv → writes stats/qm40_energy_status.csv.
-# prepare_input.py reads this file and applies energy_status != "flagged" filter.
-# In --sample mode: exits gracefully if Internal_E(0K) absent in sample stats.
+# Reads filtered_main.csv → writes energy_status column back to it.
+# dedup reads energy_status and drops flagged molecules before building SDF/mapping.
+# In --sample mode: exits gracefully if Internal_E(0K) absent in filtered CSV.
 energy_prefilter: $(_ENERGY_PREFILTER)
 
-$(_ENERGY_PREFILTER): $(_STATS)
+$(_ENERGY_PREFILTER): $(_FILTER)
 	@echo ""
-	@echo "==> [9/9] energy_prefilter — QM40 energy outlier detection (atom-type OLS regression)"
+	@echo "==> [3/9] energy_prefilter — QM40 energy outlier detection (atom-type OLS regression)"
 	@echo "    Started:  $$(date '+%Y-%m-%d %H:%M:%S')"
 	@start=$$(date +%s); \
-	 $(PYTHON) 05-selection/energy_prefilter_qm40.py $(FLAG); \
+	 $(PYTHON) 00-utils/energy_prefilter_qm40.py $(FLAG); \
 	 rc=$$?; elapsed=$$(( $$(date +%s) - start )); \
 	 echo "    Finished: $$(date '+%Y-%m-%d %H:%M:%S')  [elapsed: $${elapsed}s]"; \
 	 exit $$rc
@@ -285,18 +285,18 @@ help:
 	@echo "QM40 → AIM4ML pipeline  |  run from: scripts/"
 	@echo "Usage: make [target] [FLAG=--full-data] [WORKERS=1]"
 	@echo ""
-	@echo "  all              Full pipeline: [sample →] parse → filter → dedup → validate → reorder → stereo_filter → stats → extxyz + energy_prefilter"
+	@echo "  all              Full pipeline: [sample →] parse → filter → energy_prefilter → dedup → validate → stereo_filter → reorder → stats → extxyz"
 	@echo "  timed            Same as all + total elapsed summary at end"
 	@echo "  sample           Stage 0 — extract 200-mol sample CSVs (FLAG=--sample only)"
 	@echo "  parse            Stage 1 — extract XYZ files from xyz.csv                          (~8 min)"
 	@echo "  filter           Stage 2 — D16 curation filter (neutral + closed-shell)"
-	@echo "  dedup            Stage 3 — assign IDs (32-char MD5), rename files, build SDF       (~12 min)"
-	@echo "  validate         Stage 4 — 9-check integrity validator (dedup output vs xyz.csv)"
-	@echo "  reorder          Stage 5 — AMBER canonical atom ordering (D17)                     (~4 h, 1 worker)"
+	@echo "  energy_prefilter Stage 3 — QM40 energy outlier detection (atom-type OLS regression)"
+	@echo "  dedup            Stage 4 — assign IDs (32-char MD5), rename files, build SDF       (~12 min)"
+	@echo "  validate         Stage 5 — 9-check integrity validator (dedup output vs xyz.csv)"
 	@echo "  stereo_filter    Stage 6 — D09 enantiomer filter (SMILES-based)"
-	@echo "  stats            Stage 7 — descriptors, Tanimoto, stereo pairs                     (~80 min, 1 worker)"
-	@echo "  extxyz           Stage 8 — D18 extxyz trajectory batches (5000 mol/file)"
-	@echo "  energy_prefilter Stage 9 — QM40 energy outlier detection (atom-type OLS regression)"
+	@echo "  reorder          Stage 7 — AMBER canonical atom ordering (D17)                     (~4 h, 1 worker)"
+	@echo "  stats            Stage 8 — descriptors, Tanimoto, stereo pairs                     (~80 min, 1 worker)"
+	@echo "  extxyz           Stage 9 — D18 extxyz trajectory batches (5000 mol/file)"
 	@echo "  selection        Delegate to 05-selection/Makefile (prepare_input → scaffold_groups)"
 	@echo "  check-template   One-time QA — tautomer risk in template fallback"
 	@echo "  clean-stamps     Remove full-data stamps → force full re-run"

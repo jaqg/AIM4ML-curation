@@ -6,19 +6,12 @@ Fits OLS E_total ~ sum(n_i * e_i) over atom types {C,H,N,O,S,F,Cl,Br,P,I}
 (no intercept — physically motivated: atomic energies are additive).
 Flags molecules where the residual |z| > threshold.
 
-This approach handles all heavy-element composition variation simultaneously,
-avoiding false positives from Cl/F-heavy molecules that inflate per-atom energy
-within a naive S-bin z-score.
-
-Writes:
-    stats/qm40_energy_status.csv   — ID, energy_status, S_count, E_per_atom, z_residual
-    logs/qm40_energy_flagged.csv   — flagged rows only, with canonical_SMILES for inspection
-
-prepare_input.py reads stats/qm40_energy_status.csv and applies
-energy_status != "flagged" filter if the file exists.
+Reads filtered_main.csv, writes energy_status column back to it.
+Logs flagged rows to logs/qm40_energy_flagged.csv.
 
 Usage:
     python3 energy_prefilter_qm40.py --full-data
+    python3 energy_prefilter_qm40.py --sample
     python3 energy_prefilter_qm40.py --full-data --threshold 3.0
     python3 energy_prefilter_qm40.py --full-data --nrows 500
 """
@@ -35,21 +28,19 @@ SAMPLE_DIR = f"{AIM4ML}/samples"
 
 CONFIGS = {
     "sample": {
-        "stats_csv":   f"{SAMPLE_DIR}/qm40_stats.csv",
-        "status_csv":  f"{SAMPLE_DIR}/stats/qm40_energy_status.csv",
-        "flagged_csv": f"{SAMPLE_DIR}/logs/qm40_energy_flagged.csv",
+        "filtered_csv": f"{SAMPLE_DIR}/filtered_sample_main.csv",
+        "flagged_csv":  f"{SAMPLE_DIR}/logs/qm40_energy_flagged.csv",
     },
     "full": {
-        "stats_csv":   f"{AIM4ML}/stats/qm40_stats.csv",
-        "status_csv":  f"{AIM4ML}/stats/qm40_energy_status.csv",
-        "flagged_csv": f"{AIM4ML}/logs/qm40_energy_flagged.csv",
+        "filtered_csv": f"{AIM4ML}/filtered_main.csv",
+        "flagged_csv":  f"{AIM4ML}/logs/qm40_energy_flagged.csv",
     },
 }
 
 ATOM_SYMS = ["C", "H", "N", "O", "S", "F", "Cl", "Br", "P", "I"]
 FEAT_COLS = [f"n_{s}" for s in ATOM_SYMS]
 
-REPORT_COLS = ["ID", "canonical_SMILES", "NAT", "S_count",
+REPORT_COLS = ["Zinc_id", "smile", "NAT", "S_count",
                "Internal_E(0K)", "E_per_atom", "z_residual"]
 REPORT_N    = 15
 
@@ -76,7 +67,7 @@ def parse_args():
     mode.add_argument("--sample", dest="mode", action="store_const", const="sample",
                       help="Run on cluster sample data.")
     p.add_argument("--threshold", type=float, default=3.5,
-                   help="Residual z-score threshold (default: 3.5).")
+                   help="MAD-based robust z-score threshold (default: 3.5).")
     p.add_argument("--nrows", type=int, default=None,
                    help="Read only first N rows (dev/testing).")
     return p.parse_args()
@@ -86,18 +77,21 @@ def main():
     args = parse_args()
     cfg  = CONFIGS[args.mode]
 
-    print(f"Reading {cfg['stats_csv']} ...")
-    df = pd.read_csv(cfg["stats_csv"], nrows=args.nrows)
+    print(f"Reading {cfg['filtered_csv']} ...")
+    df = pd.read_csv(cfg["filtered_csv"], nrows=args.nrows)
     n_total = len(df)
     print(f"  Loaded: {n_total:,}")
 
-    if "Internal_E(0K)" not in df.columns or "NAT" not in df.columns:
-        print("  Internal_E(0K) or NAT absent in stats CSV — skipping energy prefilter.")
+    if "Internal_E(0K)" not in df.columns:
+        print("  Internal_E(0K) absent in filtered CSV — skipping energy prefilter.")
+        df["energy_status"] = "ok"
+        df.to_csv(cfg["filtered_csv"], index=False)
         return
 
     print("Counting atoms per molecule ...")
-    atom_counts = df["canonical_SMILES"].map(count_atoms).apply(pd.Series)
+    atom_counts = df["smile"].map(count_atoms).apply(pd.Series)
     df = pd.concat([df, atom_counts], axis=1)
+    df["NAT"]        = atom_counts.sum(axis=1)
     df["S_count"]    = df["n_S"]
     df["E_per_atom"] = df["Internal_E(0K)"] / df["NAT"]
 
@@ -106,28 +100,30 @@ def main():
         n_nonzero = int((df[col] > 0).sum())
         print(f"  {col[2:]:3s}: present in {n_nonzero:,} molecules")
 
-    print("\nFitting OLS: E_total ~ sum(n_i * e_i), no intercept ...")
-    X = df[FEAT_COLS].values.astype(float)
+    active_feat_cols = [c for c in FEAT_COLS if (df[c] > 0).any()]
+    active_syms      = [c[2:] for c in active_feat_cols]
+
+    print(f"\nFitting OLS: E_total ~ sum(n_i * e_i), no intercept  [{len(active_syms)} atom types: {', '.join(active_syms)}] ...")
+    X = df[active_feat_cols].values.astype(float)
     y = df["Internal_E(0K)"].values
     beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
 
     print("  Fitted atomic energies (Ha):")
-    for sym, e in zip(ATOM_SYMS, beta):
-        if (df[f"n_{sym}"] > 0).any():
-            print(f"    e_{sym:2s} = {e:12.6f}")
+    for sym, e in zip(active_syms, beta):
+        print(f"    e_{sym:2s} = {e:12.6f}")
 
-    residuals = y - X @ beta
-    res_mean  = residuals.mean()
-    res_std   = residuals.std()
-    z         = (residuals - res_mean) / res_std
-    df["z_residual"]   = z
+    residuals  = y - X @ beta
+    res_median = float(np.median(residuals))
+    mad        = float(np.median(np.abs(residuals - res_median)))
+    z          = 0.6745 * (residuals - res_median) / mad
+    df["z_residual"]    = z
     df["energy_status"] = "ok"
     df.loc[np.abs(z) > args.threshold, "energy_status"] = "flagged"
 
     n_flagged = int((df["energy_status"] == "flagged").sum())
     n_ok      = n_total - n_flagged
 
-    print(f"\n  Residual stats: mean={res_mean:.4g} Ha  std={res_std:.4g} Ha")
+    print(f"\n  Residual stats: median={res_median:.4g} Ha  MAD={mad:.4g} Ha  (robust z-score, k=0.6745)")
     print(f"\n--- Energy outlier summary ---")
     print(f"  Total    : {n_total:,}")
     print(f"  Flagged  : {n_flagged:,}  ({100*n_flagged/n_total:.2f}%)")
@@ -139,17 +135,20 @@ def main():
         show = [c for c in REPORT_COLS if c in df_flagged.columns]
         print(df_flagged[show].head(REPORT_N).to_string(index=False))
 
-    status_cols = ["ID", "energy_status", "S_count", "E_per_atom", "z_residual"]
-    Path(cfg["status_csv"]).parent.mkdir(parents=True, exist_ok=True)
-    df[status_cols].to_csv(cfg["status_csv"], index=False)
-    print(f"\n  Status CSV   → {cfg['status_csv']}  ({n_total:,} rows)")
+    # Write energy_status back to filtered_csv; drop temporary computation columns
+    tmp_cols = FEAT_COLS + ["NAT", "S_count", "E_per_atom", "z_residual"]
+    df_out = df.drop(columns=[c for c in tmp_cols if c in df.columns])
+    df_out.to_csv(cfg["filtered_csv"], index=False)
+    print(f"\n  Updated filtered_csv → {cfg['filtered_csv']}  (energy_status column added)")
 
     if n_flagged:
         df_flagged = df[df["energy_status"] == "flagged"]
         Path(cfg["flagged_csv"]).parent.mkdir(parents=True, exist_ok=True)
-        df_flagged[
-            status_cols + ["canonical_SMILES", "NAT", "Internal_E(0K)"]
-        ].to_csv(cfg["flagged_csv"], index=False)
+        flagged_cols = ["Zinc_id", "energy_status", "S_count", "E_per_atom", "z_residual",
+                        "smile", "NAT", "Internal_E(0K)"]
+        df_flagged[[c for c in flagged_cols if c in df_flagged.columns]].to_csv(
+            cfg["flagged_csv"], index=False
+        )
         print(f"  Flagged CSV  → {cfg['flagged_csv']}")
 
 

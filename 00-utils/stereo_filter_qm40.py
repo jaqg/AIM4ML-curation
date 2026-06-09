@@ -16,7 +16,7 @@ Works entirely from the canonical_SMILES column — no xyz files loaded.
 Adds 'stereo_status' column to qm40_mapping.csv:
   kept               — molecule passes, enters extxyz stage
   removed_enantiomer — true enantiomer of a kept molecule, skipped at extxyz
-  not_processed      — reorder_status != success, not considered
+  not_processed      — sdf_status == sdf_failed, not considered
 
 Logs removed pairs to logs/stereo_removed.csv.
 Does NOT delete xyz/sdf files (policy decision: valid structures, reversible).
@@ -84,8 +84,8 @@ def main():
 
     mapping = pd.read_csv(MAPPING_CSV)
 
-    active = mapping[mapping['reorder_status'] == 'success'].copy()
-    print(f"Active molecules (reorder success): {len(active)}")
+    active = mapping[mapping['sdf_status'] != 'sdf_failed'].copy()
+    print(f"Active molecules (sdf ok): {len(active)}")
 
     assert not any('.' in smi for smi in active['canonical_SMILES']), \
         "Unexpected complex/salt in QM40 SMILES"
@@ -132,7 +132,7 @@ def main():
                         'removed_stereo_smiles': id_to_smi[id_list[j]],
                     })
 
-    failed_ids = set(mapping.loc[mapping['reorder_status'] != 'success', 'ID'])
+    failed_ids = set(mapping.loc[mapping['sdf_status'] == 'sdf_failed', 'ID'])
     for mol_id in failed_ids:
         stereo_status[mol_id] = 'not_processed'
 
