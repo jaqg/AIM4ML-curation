@@ -29,6 +29,7 @@ if _SCRIPT_DIR not in sys.path:
 
 from rdkit import Chem
 from rdkit import RDLogger
+from rdkit.Chem import Descriptors
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -39,7 +40,7 @@ CNSO_ELEMENTS = {"C", "N", "S", "O"}
 
 # -- extXYZ writer --------------------------------------------------------
 
-def mol_block_to_extxyz(mol_block, row):
+def mol_block_to_extxyz(mol_block, row, family="QM40"):
     """
     Convert a V2000 mol block + Parquet metadata row to extXYZ text.
 
@@ -67,11 +68,29 @@ def mol_block_to_extxyz(mol_block, row):
     mult    = row.get("Multiplicity", 1)
     energy  = row.get("Energy_Ha", "")
     smiles  = row.get("CanonicalSMILES", "")
+    iconf   = row.get("ICONF", 1)
+
+    # Descriptors from CanonicalSMILES (lightweight, no external CSV needed)
+    tpsa_val, logp_val, nrot_val = "", "", ""
+    if smiles:
+        dmol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if dmol is not None:
+            dmol.UpdatePropertyCache(strict=False)
+            Chem.GetSymmSSSR(dmol)
+            try:
+                tpsa_val = f"{Descriptors.TPSA(dmol):.2f}"
+                logp_val = f"{Descriptors.MolLogP(dmol):.2f}"
+                nrot_val = str(Descriptors.NumRotatableBonds(dmol))
+            except Exception:
+                pass
 
     meta = (f"SourceID,{src_id},CompoundID,{cid},"
-            f"Formula,{formula},nat,{nat},CNSO,{cnso},"
+            f"Formula,{formula},Nat,{nat},CNSO,{cnso},"
             f"chrg,{charge},mult,{mult},"
-            f"e,{energy},smiles,{smiles}")
+            f"E,{energy},fmax,,Family,{family},"
+            f"smiles,{smiles},"
+            f"tpsa,{tpsa_val},logp,{logp_val},nrot,{nrot_val},"
+            f"nfrag,1,iconf,{iconf}")
 
     # Atom lines
     lines = [f"{nat}\n", f"{meta}\n"]
@@ -92,6 +111,8 @@ def parse_args():
                    help="Input Parquet batch directory (default: reordered_batches/).")
     p.add_argument("-o", "--output-dir", type=str, default="extxyz",
                    help="Output directory for extXYZ files (default: extxyz/).")
+    p.add_argument("--family", type=str, default="QM40",
+                   help="Dataset family name in metadata (default: QM40).")
     return p.parse_args()
 
 
@@ -120,7 +141,8 @@ def main():
 
         frames = []
         for row in batch:
-            frame = mol_block_to_extxyz(row["mol_block"], row)
+            frame = mol_block_to_extxyz(row["mol_block"], row,
+                                         family=args.family)
             if frame is None:
                 total_failed += 1
             else:
