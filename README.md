@@ -40,6 +40,159 @@ conda create -n aim4ml python=3.11 rdkit numpy pandas pyarrow matplotlib -c cond
 conda activate aim4ml
 ```
 
+## Modular Usage
+
+Each stage is a standalone script — run independently, swap backends, tune thresholds, or repurpose for different datasets without touching the Makefile.
+
+### Input/Output conventions
+
+All stages 2–10 use Parquet batches internally (zstd‑compressed). Stages 0–1 convert SDF ↔ Parquet. Each script accepts at minimum:
+
+| Flag | Meaning |
+|------|---------|
+| `-i` / `--input-dir` | Directory of Parquet batches (default varies by stage) |
+| `-o` / `--output-dir` | Directory for output Parquet batches |
+| `--rejects-dir` | Directory for rejected‑molecule SDFs |
+| `--force-keep-rejected` | Keep rejected rows in Parquet output (default: drop) |
+
+### Stage-by-stage flags
+
+#### Stage 0 — `00_validate.py`
+```bash
+python3 00_validate.py input.sdf [-o output.sdf] [--rejects-dir rejects/00_validate] [--lenient]
+```
+| Flag | Effect |
+|------|--------|
+| `input.sdf` | Positional: path to raw SDF |
+| `-o` | Clean output SDF (default: `<input>_valid.sdf`) |
+| `--lenient` | Warn instead of rejecting on missing required tags |
+
+#### Stage 1 — `01_split.py`
+```bash
+python3 01_split.py input.sdf [-o batches/] [-b 5000]
+```
+| Flag | Effect |
+|------|--------|
+| `-b` / `--batch-size` | Molecules per Parquet batch (default: 5000) |
+
+#### Stage 2 — `02_energy_prefilter.py`
+```bash
+python3 02_energy_prefilter.py -i batches/ -o filtered_batches/ \
+    [--threshold 3.5] [--atom-types H C N O F S Cl Br] [--skip] [--force-keep-rejected]
+```
+| Flag | Effect |
+|------|--------|
+| `--threshold` | MAD z‑score cut‑off (default: 3.5). Higher = fewer flagged |
+| `--atom-types` | Atom symbols to include in the OLS model (default: H,C,N,O,F,S,Cl,Br) |
+| `--skip` | Pass‑through all molecules (no energy filtering) |
+
+#### Stage 3 — `03_filter.py`
+```bash
+python3 03_filter.py -i filtered_batches/ -o curated_batches/ \
+    [--preset neutral_closed_shell] [--allowed-elements C,H,N,O,F,S,Cl,Br] \
+    [--min-heavy 4] [--max-heavy 200] [--force-keep-rejected]
+```
+| Flag | Effect |
+|------|--------|
+| `--preset` | Pre‑defined filter: `neutral_closed_shell`, `neutral`, or `none` |
+| `--allowed-elements` | Comma‑separated allowed atomic symbols |
+| `--min-heavy` | Minimum number of heavy (non‑H) atoms |
+| `--max-heavy` | Maximum number of heavy (non‑H) atoms |
+
+#### Stage 4 — `04_dedup.py`
+```bash
+python3 04_dedup.py -i curated_batches/ -o deduped_batches/ [--rejects-dir rejects/04_dedup]
+```
+Adds `CanonicalSMILES`, `CompoundID` (MD5), `Formula`, and `conformer_duplicate` flag. Duplicate conformers (same CompoundID, same energy) are tagged but kept — they're pruned later by Stage 8.
+
+#### Stage 5 — `05_validate.py`
+```bash
+python3 05_validate.py -i deduped_batches/ [--rejects-dir rejects/05_validate] [--skip]
+```
+| Flag | Effect |
+|------|--------|
+| `--skip` | Skip integrity checks entirely |
+
+#### Stage 6 — `06_stereo_filter.py`
+```bash
+python3 06_stereo_filter.py -i deduped_batches/ -o stereo_batches/ [--force-keep-rejected]
+```
+Removes one enantiomer from each racemic pair. Keeps the first canonical SMILES. Molecules with multiple fragments (complexes) are tagged `complex` and passed through.
+
+#### Stage 7 — `07_reorder.py`
+```bash
+python3 07_reorder.py -i stereo_batches/ -o reordered_batches/ \
+    [--backend rdkit] [--workers 4] [--force-keep-rejected]
+```
+| Flag | Effect |
+|------|--------|
+| `--backend` | `rdkit` (CanonicalRankAtoms, default) or `amber` (antechamber) |
+| `--workers` | Parallel workers for AMBER backend (RDKit is single‑threaded) |
+
+#### Stage 8 — `08_conformer_filter.py`
+```bash
+python3 08_conformer_filter.py -i reordered_batches/ -o conformer_batches/ \
+    [--rmsd-threshold 1.0] [--force-keep-rejected]
+```
+| Flag | Effect |
+|------|--------|
+| `--rmsd-threshold` | Heavy‑atom Kabsch RMSD cutoff in Å (default: 1.0). Lower = more conformers kept |
+
+#### Stage 9 — `09_stats.py`
+```bash
+python3 09_stats.py -i conformer_batches/ -o stats/ \
+    [--tanimoto] [--workers 8] [--exclude COLUMN=VALUE]
+```
+| Flag | Effect |
+|------|--------|
+| `--tanimoto` | Compute ECFP4 Tanimoto nearest‑neighbour (O(n²), multiprocessed) |
+| `--workers` | CPU workers for Tanimoto |
+| `--exclude` | Drop rows matching `COLUMN=VALUE` before stats (repeatable) |
+
+#### Stage 10 — `10_extxyz.py`
+```bash
+python3 10_extxyz.py -i conformer_batches/ -o extxyz/ \
+    [--family QM40] [--exclude COLUMN=VALUE]
+```
+| Flag | Effect |
+|------|--------|
+| `--family` | Dataset name written to extXYZ metadata (default: QM40) |
+| `--exclude` | Drop rows matching `COLUMN=VALUE` before writing (repeatable) |
+
+### Report utility
+
+```bash
+python3 tools/report_stats.py stats/stats_summary.csv \
+    --total-input 162954 --rejects-dir rejects/
+```
+
+Prints curation funnel (per‑stage drop counts), NAT/MolWt/TPSA/Energy descriptor summary, and Tanimoto diversity statistics (if `--tanimoto` was used in Stage 9).
+
+### Running individual stages
+
+```bash
+# Validate only (stage 0)
+python3 00_validate.py my_dataset.sdf -o my_dataset_valid.sdf
+
+# Chemically filter with custom element set (stage 3)
+python3 03_filter.py -i batches/ -o curated/ --preset neutral \
+    --allowed-elements C,H,O,N --min-heavy 6
+
+# Tighter conformer pruning (stage 8)
+python3 08_conformer_filter.py -i reordered/ -o conformers/ --rmsd-threshold 0.5
+
+# Generate extXYZ with dataset name override (stage 10)
+python3 10_extxyz.py -i conformers/ -o extxyz/ --family MyDataset
+```
+
+### Adopting for a new dataset
+
+1. Prepare an SDF with the [required tags](#input-sdf). Write a converter script (see `convert_qm40.py` as a template) if your data is in another format.
+2. Run `00_validate.py` to check the contract.
+3. Adjust `--allowed-elements`, `--min-heavy`, `--max-heavy` in Stage 3 for your chemistry.
+4. Set `--family` in Stage 10 for correct extXYZ metadata.
+5. Optionally skip Stage 2 (`--skip`) if your dataset has no energy column or you don't trust the OLS model for your atom types.
+
 ## Quick Start
 
 ```bash
@@ -126,7 +279,7 @@ scripts/
 │   ├── sdf_io.py             #   SDF read/write helpers
 │   ├── parquet_io.py         #   Parquet batch I/O
 │   └── antechamber_xyz_reord.sh  # AMBER backend helper
-├── 00-utils/                 # Legacy helper scripts (reference)
+├── tools/                    # Utility scripts (reporting, inspection)
 ├── Makefile                  # Full pipeline orchestration
 ├── DATA_PRESERVATION.md      # Archival policy
 └── README.md                 # This file
