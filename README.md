@@ -293,4 +293,4 @@ If you use this pipeline in your research, please cite the accompanying manuscri
 
 ## License
 
-[Specify your license here]
+MIT — see [LICENSE](LICENSE)
